@@ -13,10 +13,10 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"regexp"
 	"sync"
 	"time"
 
-	"github.com/d2g/dhcp4"
 	"github.com/u-root/u-root/pkg/dhclient"
 	"github.com/u-root/u-root/pkg/wpa/passphrase"
 	"github.com/vishvananda/netlink"
@@ -89,9 +89,14 @@ func main() {
 
 	// Equivalent to
 	// cmd := exec.Command("dhclient", "-ipv4=true", "-ipv6=false", "-verbose", *iface)
+
+	// if we boot quickly enough, the random number generator
+	// may not be ready, and the dhcp package panics in that case.
 	if n, err := rand.Read([]byte{0}); err != nil || n != 1 {
 		log.Fatalf("We're sorry, the random number generator is not up. Please file a ticket")
 	}
+
+	ifRE := regexp.MustCompilePOSIX(*iface)
 
 	ifnames, err := netlink.LinkList()
 	if err != nil {
@@ -101,13 +106,13 @@ func main() {
 	var wg sync.WaitGroup
 	done := make(chan error)
 	for _, i := range ifnames {
-		if i.Attrs().Name != *iface {
+		if !ifRE.MatchString(i.Attrs().Name) {
 			continue
 		}
 		wg.Add(1)
 		go func(ifname string) {
 			defer wg.Done()
-			iface, err := ifup(ifname)
+			iface, err := dhclient.IfUp(ifname)
 			if err != nil {
 				done <- err
 				return
@@ -133,37 +138,42 @@ func main() {
 	}
 
 	if nif == 0 {
-		log.Fatalf("No interfaces match %v\n", ifName)
+		log.Fatalf("No interfaces match %v\n", *iface)
 	}
 	fmt.Printf("%d dhclient attempts were sent", nif)
 }
 
 func dhclient4(iface netlink.Link) error {
 	const (
-		timeout     = time.Duration(15) * time.Second // Default timeout of dhclient cmd
-		numRenewals = -1                              // Default renewals of dhclient cmd
-		retry       = -1                              // Default retry of dhclient cmd
+		timeout = time.Duration(15) * time.Second // Default timeout of dhclient cmd
+		slop    = 10 * time.Second                // Default slop of dhclient cmd
+		retry   = -1                              // Default retry of dhclient cmd
 	)
 
-	client, err = dhclient.NewV4(iface, timeout, retry)
+	var (
+		packet       dhclient.Packet
+		mac          = iface.Attrs().HardwareAddr // For debuging purposes
+		needsRequest = true
+	)
+
+	client, err := dhclient.NewV4(iface, timeout, retry)
 	if err != nil {
 		return fmt.Errorf("error: %v", err)
 	}
-	var packet dhclient.Packet
-	for i := 0; numRenewals < 0 || i < numRenewals+1; i++ {
-		var success bool
-		for i := 0; i < retry || retry < 0; i++ {
-			if i > 0 {
-				if needsRequest {
-					debug("Resending DHCPv4 request...\n")
-				} else {
-					debug("Resending DHCPv4 renewal")
-				}
-			}
 
+	for {
+		log.Printf("Start getting or renewing DHCPv4 lease\n")
+
+		for i := 0; i > -1; i++ {
 			if needsRequest {
+				if i > 0 {
+					log.Printf("Resending DHCPv4 request...\n")
+				}
 				packet, err = client.Solicit()
 			} else {
+				if i > 0 {
+					log.Printf("Resending DHCPv4 renewal\n")
+				}
 				packet, err = client.Renew(packet)
 			}
 			if err != nil {
@@ -179,27 +189,17 @@ func dhclient4(iface netlink.Link) error {
 			}
 		}
 
-		if !success {
-			return fmt.Errorf("%s: we didn't successfully get a DHCP lease", mac)
+		if err := dhclient.HandlePacket(iface, packet); err != nil {
+			return fmt.Errorf("error handling pakcet: %v", err)
 		}
-		debug("IP Received: %v\n", packet.YIAddr().String())
-
-		// We got here because we got a good packet.
-		o := packet.ParseOptions()
-		debug("Options: %v", o)
-
-		netmask, ok := o[dhcp4.OptionSubnetMask]
-		if ok {
-			debug("OptionSubnetMask is %v\n", netmask)
-		} else {
-			// If they did not offer a subnet mask, we
-			// choose the most restrictive option, namely,
-			// our IP address.  This could happen on,
-			// e.g., a point to point link.
-			netmask = packet.YIAddr()
-			debug("No OptionSubnetMask; default to %v\n", netmask)
+		if packet.Leases()[0].ValidLifetime == 0 {
+			log.Printf("%v: server returned infinite lease.\n", iface.Attrs().Name)
+			break
 		}
-		dhclient.HandlePacket(iface, packet)
+
+		// We can not assume the server will give us any grace time. So
+		// sleep for just a tiny bit less than the minimum.
+		time.Sleep(timeout - slop)
 	}
 	return nil
 }
