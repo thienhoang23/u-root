@@ -214,6 +214,24 @@ func connectWifiArbitrator() {
 	}
 }
 
+// To prevent race condition, there should be only one
+// goroutine running refreshNotifier at any one time
+func refreshNotifier() {
+	workDone := make(chan bool)
+	pool := make(chan RefreshReqChanMsg, DefaultBufferSize)
+	for {
+		select {
+		case pool <- RefreshReqChan:
+		case <-workDone:
+			close(pool)
+			for req := range pool {
+				req.c <- true
+			}
+			pool = make(chan RefreshReqChan, DefaultBufferSize)
+		}
+	}
+}
+
 func connectWifi(a ...string) error {
 	if *test {
 		return nil
