@@ -74,6 +74,7 @@ func init() {
 
 func scanWifi() error {
 	if *test {
+		NearbyWifis = StubNearbyWifis
 		return nil
 	}
 
