@@ -218,22 +218,27 @@ func connectWifiArbitrator() {
 // goroutine running refreshNotifier at any one time
 func refreshNotifier() {
 	refreshing := false
-	workDone := make(chan error)
+	workDone := make(chan bool, 1)
 	pool := make(chan RefreshReqChanMsg, DefaultBufferSize)
+
+	// Pooler
 	for {
 		select {
-		case pool <- <-RefreshReqChan:
+		case r := <-RefreshReqChan:
 			if !refreshing {
 				refreshing = true
-				go func() {
-					workDone <- scanWifi()
-				}()
+				// Notifier
+				go func(p chan RefreshReqChanMsg) {
+					err := scanWifi()
+					workDone <- true
+					for req := range p {
+						req.c <- err
+					}
+				}(pool)
 			}
-		case e := <-workDone:
+			pool <- r
+		case <-workDone:
 			close(pool)
-			for req := range pool {
-				req.c <- e
-			}
 			refreshing = false
 			pool = make(chan RefreshReqChanMsg, DefaultBufferSize)
 		}

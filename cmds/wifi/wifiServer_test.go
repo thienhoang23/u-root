@@ -171,7 +171,7 @@ func refreshNotifierSetup(bufferSize int) {
 
 func TestRefreshHandleRace(t *testing.T) {
 	// Set Up
-	numGoRoutines := 2
+	numGoRoutines := 100
 	turnOnTestingMode()
 	refreshNotifierSetup(numGoRoutines)
 	defer close(RefreshReqChan)
